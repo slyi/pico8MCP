@@ -204,11 +204,11 @@ def main():
                 built = client.tool('build', cart='floor.lua', out='debug/ci/floor.p8.png', label_frames=6)
                 assert built['verified'] and built['labelCaptured'] and not built['instrumented'], built
                 cartridge = Path(built['path']).read_bytes()
+                (out/'floor.p8.png').write_bytes(cartridge)
                 label = png_pixels(cartridge, expected_size=(160, 205))
                 label_ground = [p for row in label[100:148] for p in row[20:140]]
                 assert sum(max(p) < 20 for p in label_ground) > len(label_ground)*0.15, 'Label is missing black floor tiles'
                 assert sum(min(p) > 200 for p in label_ground) > len(label_ground)*0.15, 'Label is blank or missing white floor tiles'
-                (out/'floor.p8.png').write_bytes(cartridge)
                 report.update(nativePngBuild=True, nativeLabel=True, pngReload=True)
                 closed = client.tool('close')
                 assert closed['profileCleanup'] == 'preserved', closed

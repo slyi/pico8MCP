@@ -295,8 +295,8 @@ class Adapter:
             # windowsVirtualKeyCode is portable; nativeVirtualKeyCode is not.
             self.client.call('Input.dispatchKeyEvent',dict(type=kind,key=value,code=code,
                              windowsVirtualKeyCode=vk,modifiers=modifiers))
-        # The native label shortcut is Cmd+7 on macOS and Ctrl+7 elsewhere.
-        modifier,value,code,vk=(4,'Meta','MetaLeft',91) if sys.platform=='darwin' else (2,'Control','ControlLeft',17)
+        # Education's web VM uses Ctrl+7, including when hosted on macOS.
+        modifier,value,code,vk=2,'Control','ControlLeft',17
         key('keyDown',value,code,vk,modifier)
         try:
             key('keyDown','7','Digit7',55,modifier)
