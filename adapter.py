@@ -288,26 +288,31 @@ class Adapter:
         self.start(headless=True,timeout_ms=timeout_ms)
         self.load(cart=cart,instrument=False,timeout_ms=timeout_ms)
         self.run(timeout_ms=timeout_ms)
-        self.wait_frames(frames=label_frames,timeout_ms=timeout_ms)
+        try:self.wait_frames(frames=label_frames,timeout_ms=timeout_ms)
+        except AdapterError as exc:raise AdapterError('BUILD_FAILED','Waiting for label frames failed.',{'cause':str(exc)}) from exc
         self._eval('canvas.focus();__p8agent.downloads=[];true')
         def key(kind,value,code,vk,modifiers=0):
+            # windowsVirtualKeyCode is portable; nativeVirtualKeyCode is not.
             self.client.call('Input.dispatchKeyEvent',dict(type=kind,key=value,code=code,
-                             windowsVirtualKeyCode=vk,nativeVirtualKeyCode=vk,modifiers=modifiers))
-        # Capture the framebuffer through PICO-8's Ctrl+7 label shortcut.
-        key('keyDown','Control','ControlLeft',17,2)
+                             windowsVirtualKeyCode=vk,modifiers=modifiers))
+        # The native label shortcut is Cmd+7 on macOS and Ctrl+7 elsewhere.
+        modifier,value,code,vk=(4,'Meta','MetaLeft',91) if sys.platform=='darwin' else (2,'Control','ControlLeft',17)
+        key('keyDown',value,code,vk,modifier)
         try:
-            key('keyDown','7','Digit7',55,2)
+            key('keyDown','7','Digit7',55,modifier)
             self._wait_js('true',timeout_ms,settle_frames=6)
-            key('keyUp','7','Digit7',55,2)
-        finally:key('keyUp','Control','ControlLeft',17)
+            key('keyUp','7','Digit7',55,modifier)
+        finally:key('keyUp',value,code,vk)
         self._wait_js('true',timeout_ms,settle_frames=4)
         key('keyDown','Escape','Escape',27)
+        self._wait_js('true',timeout_ms,settle_frames=4)
         key('keyUp','Escape','Escape',27)
         # Native frame_number stops in the console; use browser render ticks.
         self._wait_js('true',timeout_ms,settle_frames=4)
         command=[ord(c) for c in 'save pico8mcp-build.p8.png']+[13]
         self._eval('codo_key_buffer.push(...'+json.dumps(command)+');true')
-        self._wait_js('__p8agent.downloads.some(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")',timeout_ms)
+        try:self._wait_js('__p8agent.downloads.some(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")',timeout_ms)
+        except AdapterError as exc:raise AdapterError('BUILD_FAILED','Native console did not export the PNG.',{'cause':str(exc),'messages':self.state().get('vm',{}).get('system_messages',[])}) from exc
         download=self._eval('__p8agent.downloads.find(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")')
         encoded=download['contents']
         if not isinstance(encoded,str):

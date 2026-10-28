@@ -70,7 +70,7 @@ The equivalent MCP tool is:
 
 Build starts or reuses the owned VM, loads the source without development
 instrumentation, runs it for the requested frames, captures the screen
-with PICO-8's native Ctrl+7 label shortcut, and executes native `save`.
+with PICO-8's native Ctrl+7 label shortcut (Cmd+7 on macOS), and executes native `save`.
 It then reloads and runs the generated PNG to verify the cartridge.
 It replaces the current cart and leaves the generated cart running.
 CLI builds close their owned browser when complete.
