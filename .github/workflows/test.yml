@@ -56,7 +56,11 @@ jobs:
         if: runner.os != 'Windows'
         env:
           TEST_ARCH: ${{ matrix.architecture }}
-        run: python -B tests/ci.py --expect-non-admin --expect-arch "$TEST_ARCH"
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            export PICO8_BROWSER="$(command -v google-chrome)"
+          fi
+          python -B tests/ci.py --expect-non-admin --expect-arch "$TEST_ARCH"
       - name: Upload reports and native 128x128 screenshots
         if: always()
         uses: actions/upload-artifact@v5

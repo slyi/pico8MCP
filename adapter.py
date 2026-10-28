@@ -1,6 +1,7 @@
 """Standalone local browser adapter. Python 3.10+, standard library only."""
 from __future__ import annotations
 import base64
+from collections import deque
 import hashlib
 import json
 import math
@@ -89,6 +90,7 @@ class Adapter:
         self.profile_path=Path(profile).resolve() if profile else browser_profile()
         self.client=None;self.process=None;self.http=None;self.port=None;self.loaded=None
         self.sequence=0;self.profile_dir=None;self.headless=None;self.profile_lease=None
+        self.browser_logs=deque(maxlen=40)
 
     def path(self,value,output=False):
         candidate=(self.root/value).resolve()
@@ -173,8 +175,9 @@ class Adapter:
                                           stderr=subprocess.PIPE,creationflags=creation)
             lease.record(status='running',browserPid=self.process.pid,debugPort=self.port,browser=executable)
             stream=self.process.stderr
+            self.browser_logs.clear()
             def drain():
-                for _ in stream:pass
+                for line in stream:self.browser_logs.append(line.strip()[-1000:])
             threading.Thread(target=drain,daemon=True).start()
             deadline=time.monotonic()+timeout_ms/1000
             last=None
@@ -184,9 +187,9 @@ class Adapter:
                     target=next((t for t in targets if t.get('type')=='page' and t.get('url','').startswith(url)),None)
                     if target:self.client=connect(target);break
                 except (OSError,ValueError,CDPError) as exc:last=str(exc)
-                if self.process.poll() not in (None,0):raise AdapterError('BROWSER_EXITED','Browser exited during launch.')
+                if self.process.poll() not in (None,0):raise AdapterError('BROWSER_EXITED','Browser exited during launch.',{'exitCode':self.process.returncode,'stderr':list(self.browser_logs)})
                 time.sleep(.05)
-            if not self.client:raise AdapterError('START_TIMEOUT','No local browser page became available.',{'lastError':last})
+            if not self.client:raise AdapterError('START_TIMEOUT','No local browser page became available.',{'lastError':last,'stderr':list(self.browser_logs)})
             self.client.call('Page.enable');self.client.call('Runtime.enable')
             while time.monotonic()<deadline:
                 try:
@@ -195,7 +198,7 @@ class Adapter:
                         return dict(reused=False,port=self.port,headless=headless,**self.state())
                 except CDPError as exc:last=str(exc)
                 time.sleep(.05)
-            raise AdapterError('START_TIMEOUT','Education VM did not finish booting.',{'lastError':last})
+            raise AdapterError('START_TIMEOUT','Education VM did not finish booting.',{'lastError':last,'stderr':list(self.browser_logs)})
         except Exception:self.close();raise
 
     def _eval(self,js,timeout=15):

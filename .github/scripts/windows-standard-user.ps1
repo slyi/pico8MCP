@@ -13,9 +13,12 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 if ($Child) {
     # Start-Process inherits the runner's environment. Resolve these paths
     # through the new account's loaded Windows profile instead.
-    $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile')
-    $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData')
-    $env:APPDATA = [Environment]::GetFolderPath('ApplicationData')
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+    $profile = (Get-ItemProperty -LiteralPath $profileKey).ProfileImagePath
+    $env:USERPROFILE = [Environment]::ExpandEnvironmentVariables($profile)
+    $env:LOCALAPPDATA = Join-Path $env:USERPROFILE 'AppData/Local'
+    $env:APPDATA = Join-Path $env:USERPROFILE 'AppData/Roaming'
     $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
     $env:TMP = $env:TEMP
     New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
