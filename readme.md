@@ -1,4 +1,4 @@
-# PICO-8 Education MCP / 0.2.0
+# PICO-8 Education MCP / 0.3.0
 
 [![Cross-platform tests](https://github.com/slyi/pico8MCP/actions/workflows/test.yml/badge.svg)](https://github.com/slyi/pico8MCP/actions/workflows/test.yml)
 
@@ -50,6 +50,37 @@ runtime directory or browser profile.
 PICO-8 remains the property of Lexaloffle. This adapter is not affiliated
 with or endorsed by Lexaloffle.
 
+## Build a labelled `.p8.png` cartridge
+
+From the repository directory:
+
+```sh
+python pico8_mcp.py --root examples/3dfloor --build floor.lua
+```
+
+Use `python3` on POSIX. The output is
+`examples/3dfloor/debug/floor.p8.png`. Override its location with
+`--out debug/my-floor.p8.png` (relative to `--root`).
+
+The equivalent MCP tool is:
+
+```json
+{"name":"pico8_build","arguments":{"cart":"floor.lua","out":"debug/floor.p8.png","label_frames":10}}
+```
+
+Build starts or reuses the owned VM, loads the source without development
+instrumentation, runs it for the requested frames, captures the screen
+with PICO-8's native Ctrl+7 label shortcut, and executes native `save`.
+It then reloads and runs the generated PNG to verify the cartridge.
+It replaces the current cart and leaves the generated cart running.
+CLI builds close their owned browser when complete.
+
+This is a real 160 × 205 PNG cartridge with embedded game data and label,
+not a renamed text file or screenshot. It can be uploaded to the
+Lexaloffle cartridge form. Input and output paths must stay within `--root`.
+An existing Chrome/Edge/Chromium browser is required. No external Python
+packages or desktop PICO-8 installation are needed.
+
 ## Run The Mcp Server
 
     python pico8_mcp.py --root /absolute/path/to/your/cart-project
@@ -93,7 +124,7 @@ the example's WASD mapping. The bundled floor example supports WASD in addition 
 
 ## Tools
 
-setup / doctor / start / load / run / state / pause / resume / step /
+setup / doctor / start / load / run / build / state / pause / resume / step /
 buttons / wait_frames / get / set / gpio / screenshot / profile / logs /
 session / close (all tool names have the pico8_ prefix).
 
@@ -206,7 +237,8 @@ Each job runs the offline regression suite, downloads and verifies the
 official runtime in a fresh user-owned location, repeats cached setup,
 starts the **installed** MCP server, runs `examples/3dfloor/floor.lua`,
 and checks native 128 × 128 screenshots at yaw 0° and 45°. It verifies
-controller strafe and the platform launcher at 30 FPS. Reports and PNGs
+controller strafe, builds a native labelled `.p8.png`, validates the label,
+reloads the PNG cartridge, and checks the platform launcher at 30 FPS. Reports and PNGs
 are uploaded for seven days; runtime caches and browser profiles are
 never included in those artifacts.
 

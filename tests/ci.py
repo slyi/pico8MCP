@@ -95,11 +95,12 @@ class Client:
                 self.process.wait(timeout=10)
 
 
-def png_pixels(data):
+def png_pixels(data, expected_size=(128, 128)):
     """Decode browser RGB/RGBA PNGs to reject a blank or broken framebuffer."""
     assert data[:8] == b'\x89PNG\r\n\x1a\n'
     width, height, depth, color = struct.unpack('>IIBB', data[16:26])
-    assert (width, height, depth) == (128, 128, 8)
+    assert (width, height) == expected_size
+    assert depth == 8
     assert color in (2, 6), f'Unexpected canvas PNG color type {color}'
     channels = 4 if color == 6 else 3
     compressed = bytearray()
@@ -200,6 +201,15 @@ def main():
                 client.tool('step', frames=12, buttons=18)
                 after = client.tool('get', name='cam_u')['value']
                 assert before != after, 'Controller strafe did not update the camera'
+                built = client.tool('build', cart='floor.lua', out='debug/ci/floor.p8.png', label_frames=6)
+                assert built['verified'] and built['labelCaptured'] and not built['instrumented'], built
+                cartridge = Path(built['path']).read_bytes()
+                label = png_pixels(cartridge, expected_size=(160, 205))
+                label_ground = [p for row in label[100:148] for p in row[20:140]]
+                assert sum(max(p) < 20 for p in label_ground) > len(label_ground)*0.15, 'Label is missing black floor tiles'
+                assert sum(min(p) > 200 for p in label_ground) > len(label_ground)*0.15, 'Label is blank or missing white floor tiles'
+                (out/'floor.p8.png').write_bytes(cartridge)
+                report.update(nativePngBuild=True, nativeLabel=True, pngReload=True)
                 closed = client.tool('close')
                 assert closed['profileCleanup'] == 'preserved', closed
                 report.update(mcpStdio=True, run3dfloor=True, screenshots=[0, 45], controllerStrafe=True)

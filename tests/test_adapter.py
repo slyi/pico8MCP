@@ -106,6 +106,17 @@ class OfflineTests(unittest.TestCase):
             (cache/'runtime.js').write_bytes(b'corrupt')
             with self.assertRaises(AdapterError):a.setup()
             a.close()
+    def test_build_rejects_paths_before_launch(self):
+        with tempfile.TemporaryDirectory(dir=self.temp_root) as folder:
+            root=Path(folder);(root/'floor.lua').write_text('function _draw() cls() end')
+            a=Adapter(root)
+            with mock.patch.object(a,'start') as start:
+                for args in [dict(cart='floor.lua',out='../escape.p8.png'),
+                             dict(cart='floor.lua',out='floor.png'),
+                             dict(cart='floor.lua',label_frames=0)]:
+                    with self.assertRaises(AdapterError):a.build(**args)
+                start.assert_not_called()
+            a.close()
     def test_stdio_pipeline(self):
         with tempfile.TemporaryDirectory(dir=self.temp_root) as folder:
             c=Client(folder)

@@ -23,6 +23,19 @@ On Linux, WSL or macOS, run:
 sh ./play.sh
 ```
 
+## Build for upload or sharing
+
+From this example directory:
+
+```sh
+python ../../pico8_mcp.py --build floor.lua
+```
+
+Use `python3` on POSIX. This creates `debug/floor.p8.png` using the native
+VM, captures a label, and reloads the PNG to check that it runs. Upload
+this `.p8.png` file to the Lexaloffle cartridge form; renaming a text
+`.p8` file to `.p8.png` does not convert it.
+
 ## Controls
 
 | Input | Action |

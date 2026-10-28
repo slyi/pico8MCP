@@ -11,7 +11,7 @@ from pathlib import Path
 from adapter import Adapter,AdapterError
 
 NAME='pico8-education-mcp'
-VERSION='0.2.0'
+VERSION='0.3.0'
 PROTOCOL='2025-06-18'
 
 def tool(name,description,properties=None,required=None,readonly=False):
@@ -31,6 +31,8 @@ TOOLS=[
  tool('load','Load a root-contained .p8/.lua cart or inline Lua; does not run. instrument=true injects a development bridge in memory, reserving GPIO 64..127. count_draws adds optional API-call counters. PNG requires instrument=false.',
       {'cart':STR,'lua':STR,'instrument':BOOL,'count_draws':BOOL,'timeout_ms':TIMEOUT}),
  tool('run','Reload the last loaded in-memory cartridge and run from a clean state in the same browser. paused=true freezes user simulation once running.',{'paused':BOOL,'timeout_ms':TIMEOUT}),
+ tool('build','Build a real .p8.png cartridge from root-contained .lua/.p8 source. Loads and runs WITHOUT instrumentation, captures its native label, exports through the VM and reloads the result. Starts/reuses the owned browser; replaces the current cart. Output defaults to source-dir/debug/name.p8.png.',
+      {'cart':STR,'out':STR,'label_frames':FRAMES,'timeout_ms':TIMEOUT},['cart']),
  tool('state','Read VM state, GPIO, bridge CPU/FPS/update counters and current errors. Never reloads.',readonly=True),
  tool('pause','Freeze user update/draw callbacks while keeping the bridge responsive. Requires an instrumented cart.'),
  tool('resume','Resume the instrumented cart simulation without resetting its state.'),
@@ -174,7 +176,16 @@ def main():
     parser.add_argument('--setup',action='store_true',help='Install/verify runtime cache and exit; no browser needed.')
     parser.add_argument('--update',action='store_true',help='Refresh the official runtime during --setup.')
     parser.add_argument('--doctor',action='store_true',help='Print environment checks and exit.')
-    args=parser.parse_args();adapter=Adapter(args.root,args.cache,args.profile)
+    parser.add_argument('--build',metavar='CART',help='Build a .lua/.p8 source into a labelled .p8.png using the native VM.')
+    parser.add_argument('--out',help='Build output path within --root; defaults to source-dir/debug/name.p8.png.')
+    args=parser.parse_args()
+    if args.out and not args.build:parser.error('--out requires --build')
+    if args.build and (args.setup or args.doctor):parser.error('--build cannot be combined with --setup or --doctor')
+    adapter=Adapter(args.root,args.cache,args.profile)
+    if args.build:
+        try:print(json.dumps(adapter.build(args.build,args.out),indent=2));return 0
+        except Exception as exc:print(json.dumps({'ok':False,'error':error_info(exc)}));return 1
+        finally:adapter.close()
     if args.setup or args.doctor:
         try:print(json.dumps(adapter.setup(args.update) if args.setup else adapter.doctor(),indent=2));return 0
         except Exception as exc:print(json.dumps({'ok':False,'error':error_info(exc)}));return 1

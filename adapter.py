@@ -274,6 +274,61 @@ class Adapter:
             self._wait_js('codo_key_buffer.length===0 && (pico8_state.frame_number||0)>0',timeout_ms,settle_frames=6)
         return self.state()
 
+    def build(self,cart,out=None,label_frames=10,timeout_ms=30000):
+        """Build an uninstrumented PNG cartridge with a native captured label."""
+        source=self.path(cart)
+        if source.suffix.lower() not in ('.lua','.p8'):
+            raise AdapterError('INVALID_CART','Build expects a .lua or text .p8 source.')
+        if type(label_frames) is not int or not 1<=label_frames<=600:
+            raise AdapterError('INVALID_ARGUMENT','label_frames must be 1..600.')
+        name=out or str(source.relative_to(self.root).parent/'debug'/(source.stem+'.p8.png'))
+        if not str(name).lower().endswith('.p8.png'):
+            raise AdapterError('INVALID_ARGUMENT','Build output must end with .p8.png.')
+        target=self.path(name,output=True)
+        self.start(headless=True,timeout_ms=timeout_ms)
+        self.load(cart=cart,instrument=False,timeout_ms=timeout_ms)
+        self.run(timeout_ms=timeout_ms)
+        self.wait_frames(frames=label_frames,timeout_ms=timeout_ms)
+        self._eval('canvas.focus();__p8agent.downloads=[];true')
+        def key(kind,value,code,vk,modifiers=0):
+            self.client.call('Input.dispatchKeyEvent',dict(type=kind,key=value,code=code,
+                             windowsVirtualKeyCode=vk,nativeVirtualKeyCode=vk,modifiers=modifiers))
+        # Capture the framebuffer through PICO-8's Ctrl+7 label shortcut.
+        key('keyDown','Control','ControlLeft',17,2)
+        try:
+            key('keyDown','7','Digit7',55,2)
+            self._wait_js('true',timeout_ms,settle_frames=6)
+            key('keyUp','7','Digit7',55,2)
+        finally:key('keyUp','Control','ControlLeft',17)
+        self._wait_js('true',timeout_ms,settle_frames=4)
+        key('keyDown','Escape','Escape',27)
+        key('keyUp','Escape','Escape',27)
+        # Native frame_number stops in the console; use browser render ticks.
+        self._wait_js('true',timeout_ms,settle_frames=4)
+        command=[ord(c) for c in 'save pico8mcp-build.p8.png']+[13]
+        self._eval('codo_key_buffer.push(...'+json.dumps(command)+');true')
+        self._wait_js('__p8agent.downloads.some(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")',timeout_ms)
+        download=self._eval('__p8agent.downloads.find(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")')
+        encoded=download['contents']
+        if not isinstance(encoded,str):
+            raise AdapterError('BUILD_FAILED','Native PNG download has an unsupported encoding.')
+        if encoded.startswith('data:'):encoded=encoded.split(',',1)[1]
+        try:data=base64.b64decode(encoded,validate=True)
+        except ValueError as exc:raise AdapterError('BUILD_FAILED','Native PNG download is not valid base64.') from exc
+        if data[:8]!=b'\x89PNG\r\n\x1a\n' or len(data)<33:
+            raise AdapterError('BUILD_FAILED','The VM did not export a PNG cartridge.')
+        width,height=struct.unpack('>II',data[16:24])
+        if (width,height)!=(160,205):
+            raise AdapterError('BUILD_FAILED','Unexpected native cartridge dimensions.',dict(width=width,height=height))
+        target.write_bytes(data)
+        # Prove the actual encoded PNG loads and executes, rather than returning
+        # an ordinary screenshot renamed as a cartridge.
+        self.load(cart=str(target.relative_to(self.root)),instrument=False,timeout_ms=timeout_ms)
+        self.run(timeout_ms=timeout_ms)
+        return dict(built=True,path=str(target),bytes=len(data),width=width,height=height,
+                    labelCaptured=True,labelFrames=label_frames,verified=True,
+                    instrumented=False,sha256=hashlib.sha256(data).hexdigest())
+
     def _command(self,opcode,params=None,timeout_ms=10000,complete=True):
         if not self.state().get('bridge',{}).get('ready'):raise AdapterError('BRIDGE_REQUIRED','Load with instrument=true and run the cart for this operation.')
         self.sequence=self.sequence%255+1;seq=self.sequence
