@@ -1,0 +1,67 @@
+name: Test PICO-8 MCP
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }} / Python 3.12
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64 (standard user)
+            runner: windows-latest
+            architecture: x64
+          - name: Windows ARM64 (standard user)
+            runner: windows-11-arm
+            architecture: arm64
+          - name: Linux x64
+            runner: ubuntu-latest
+            architecture: x64
+          - name: macOS ARM64
+            runner: macos-latest
+            architecture: arm64
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        id: python
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.architecture }}
+      - name: Setup, run and screenshot as a Windows standard user
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+          TEST_ARCH: ${{ matrix.architecture }}
+        run: ./.github/scripts/windows-standard-user.ps1 -Python $env:TEST_PYTHON -Architecture $env:TEST_ARCH
+      - name: Setup, run and screenshot without sudo
+        if: runner.os != 'Windows'
+        env:
+          TEST_ARCH: ${{ matrix.architecture }}
+        run: python -B tests/ci.py --expect-non-admin --expect-arch "$TEST_ARCH"
+      - name: Upload reports and native 128x128 screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: results-${{ matrix.runner }}-${{ matrix.architecture }}
+          path: debug/ci/
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,7 @@
+.runtime/
+.state/
+.pico8-mcp/
+debug/
+/examples/3dfloor/debug/
+__pycache__/
+*.pyc

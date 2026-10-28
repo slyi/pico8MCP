@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pico8": {
+      "command": "python3",
+      "args": [
+        "/absolute/path/to/pico8-mcp/pico8_mcp.py",
+        "--root",
+        "/absolute/path/to/cart-project"
+      ]
+    }
+  }
+}

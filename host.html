@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PICO-8 MCP local host</title>
+<style>
+body{background:#171720;color:#ddd;font:14px monospace;margin:24px}
+canvas{width:512px;height:512px;image-rendering:pixelated;display:block;background:#000}
+textarea{position:absolute;left:-9999px;width:1px;height:1px}
+</style>
+<p>PICO-8 Education Edition · local agent host</p>
+<canvas id="canvas" width="128" height="128" tabindex="0"></canvas>
+<textarea id="codo_textarea"></textarea>
+<input id="p8_file_chooser" type="file" hidden>
+<script>
+// Public Education Edition shell interfaces, compatible with the 0.2.7 player.
+var pico8_state=[],pico8_buttons=[0,0,0,0,0,0,0,0],pico8_mouse=[];
+var pico8_gpio=new Array(128).fill(0),codo_key_buffer=[];
+var codo_command=0,codo_command_p=0,codo_textarea=document.getElementById('codo_textarea');
+var p8_dropped_cart=null,p8_dropped_cart_name='',p8_touch_detected=false;
+var _cartname=[],p8_is_running=true;
+window.__p8agent={logs:[],downloads:[],ready:false,loadGeneration:0};
+const addLog=(level,args)=>{
+  const logs=window.__p8agent.logs;
+  const text=args.map(x=>String(x)).join(' ')
+    .replace(/data:[^\s;]+;base64,[A-Za-z0-9+/=]+/g,'<cart payload omitted>').slice(0,4000);
+  logs.push({level,time:Date.now(),text});
+  if(logs.length>300)logs.splice(0,logs.length-300);
+};
+for(const level of ['log','warn','error']){
+  const original=console[level].bind(console);
+  console[level]=(...args)=>{addLog(level,args);original(...args)};
+}
+window.addEventListener('error',e=>addLog('error',[e.message]));
+window.addEventListener('unhandledrejection',e=>addLog('error',[e.reason]));
+function download_browser_file(name,contents){
+  __p8agent.downloads.push({name,contents});
+}
+function p8_drop_file(e){
+  e.preventDefault();e.stopPropagation();
+  const file=e.dataTransfer?.files?.[0]||e.target?.files?.[0];
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=()=>{
+    p8_dropped_cart=reader.result;p8_dropped_cart_name=file.name;
+    codo_command=9;__p8agent.loadGeneration++;
+  };
+  reader.readAsDataURL(file);
+}
+document.getElementById('p8_file_chooser').addEventListener('change',p8_drop_file);
+const canvas=document.getElementById('canvas');
+canvas.addEventListener('dragover',e=>e.preventDefault());
+canvas.addEventListener('drop',p8_drop_file);
+window.addEventListener('keydown',e=>{
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key))e.preventDefault();
+});
+var Module={canvas,arguments:[],noExitRuntime:true,
+  print:(...a)=>addLog('info',a),printErr:(...a)=>addLog('error',a),
+  onRuntimeInitialized:()=>{__p8agent.ready=true}
+};
+</script>
+<script src="/runtime.js"></script>
