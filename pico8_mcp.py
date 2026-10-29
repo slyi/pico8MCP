@@ -11,7 +11,7 @@ from pathlib import Path
 from adapter import Adapter,AdapterError
 
 NAME='pico8-education-mcp'
-VERSION='0.3.0'
+VERSION='0.6.0'
 PROTOCOL='2025-06-18'
 
 def tool(name,description,properties=None,required=None,readonly=False):
@@ -23,16 +23,25 @@ BOOL={'type':'boolean'};INT={'type':'integer'};STR={'type':'string'}
 TIMEOUT={'type':'integer','minimum':100,'maximum':60000}
 MASK={'type':'integer','minimum':0,'maximum':63,'description':'0 neutral; 1 left, 2 right, 4 up, 8 down, 16 O, 32 X. Combine bits.'}
 FRAMES={'type':'integer','minimum':1,'maximum':600}
+BUNDLE_CART={'oneOf':[STR,{'type':'object','properties':{'cart':STR,'name':STR},'required':['cart'],'additionalProperties':False}]}
 TOOLS=[
  tool('setup','Download/cache only the official Education runtime. No browser, pip, system install or admin required; cached files are SHA-256 checked.',{'update':BOOL}),
  tool('doctor','Inspect Python, platform, browser discovery and runtime cache integrity. Does not launch a browser.',readonly=True),
  tool('start','Start one owned localhost browser/VM, or reuse it without reload. Requires an existing Chrome/Edge/Chromium. Setup is automatic.',
       {'headless':BOOL,'browser':{'type':'string','enum':['auto','edge','chrome','chromium']},'timeout_ms':TIMEOUT}),
- tool('load','Load a root-contained .p8/.lua cart or inline Lua; does not run. instrument=true injects a development bridge in memory, reserving GPIO 64..127. count_draws adds optional API-call counters. PNG requires instrument=false.',
-      {'cart':STR,'lua':STR,'instrument':BOOL,'count_draws':BOOL,'timeout_ms':TIMEOUT}),
- tool('run','Reload the last loaded in-memory cartridge and run from a clean state in the same browser. paused=true freezes user simulation once running.',{'paused':BOOL,'timeout_ms':TIMEOUT}),
+ tool('load','Load a root-contained .p8/.lua cart or inline Lua; does not run. instrument=true injects a development bridge in memory, reserving GPIO 64..127. count_draws adds API-call counters. profiling, profile_functions or profile_sections opt into detailed CPU timings. PNG requires instrument=false.',
+      {'cart':STR,'lua':STR,'instrument':BOOL,'count_draws':BOOL,'timeout_ms':TIMEOUT,
+       'profiling':BOOL,'profile_functions':{'type':'array','items':STR,'maxItems':16},'profile_sections':BOOL}),
+ tool('load_bundle','Stage a local multicart bundle using native file drop and SAVE, then select the entry without running it. Dependencies are paths or {cart,name}; PNG and Lua inputs default to .p8 native names. Every source stays under --root. Auxiliary carts are uninstrumented; development options apply only to the entry.',
+      {'entry':STR,'carts':{'type':'array','items':BUNDLE_CART,'maxItems':63},'entry_name':STR,
+       'instrument':BOOL,'count_draws':BOOL,'profiling':BOOL,
+       'profile_functions':{'type':'array','items':STR,'maxItems':16},'profile_sections':BOOL,'timeout_ms':TIMEOUT},['entry']),
+ tool('run','Reload and run the selected cart or bundle entry in the same browser. Staged dependencies remain in the native VM filesystem. paused=true freezes an instrumented entry once running.',{'paused':BOOL,'timeout_ms':TIMEOUT}),
  tool('build','Build a real .p8.png cartridge from root-contained .lua/.p8 source. Loads and runs WITHOUT instrumentation, captures its native label, exports through the VM and reloads the result. Starts/reuses the owned browser; replaces the current cart. Output defaults to source-dir/debug/name.p8.png.',
       {'cart':STR,'out':STR,'label_frames':FRAMES,'timeout_ms':TIMEOUT},['cart']),
+ tool('pack_source','Build a text .p8 offline from root-contained Lua code and literal asset_bytes/asset_regions tables. Does not execute project code or launch a browser. Custom mesh/motion formats use a project packer with the shared source_build helpers.',
+      {'cart':STR,'out':STR},['cart']),
+ tool('cart_size','Inspect a native .p8.png: PNG file bytes, decoded 32 KiB ROM and compressed Lua size. Read-only, dependency-free, no browser.',{'cart':STR},['cart'],True),
  tool('state','Read VM state, GPIO, bridge CPU/FPS/update counters and current errors. Never reloads.',readonly=True),
  tool('pause','Freeze user update/draw callbacks while keeping the bridge responsive. Requires an instrumented cart.'),
  tool('resume','Resume the instrumented cart simulation without resetting its state.'),
@@ -47,7 +56,9 @@ TOOLS=[
       {'offset':{'type':'integer','minimum':0,'maximum':127},'count':{'type':'integer','minimum':0,'maximum':128},'values':{'type':'array','items':{'type':'integer','minimum':0,'maximum':255},'maxItems':64}}),
  tool('screenshot','Return the real 128x128 framebuffer as native MCP PNG image content and save a root-contained PNG. Captures the current cart without reload.',{'out':STR},readonly=True),
  tool('profile','Measure CPU fractions and optional draw API counts across exact simulation updates. Ends paused. sample_every=1 captures each update; higher values sample the last update of each batch.',
-      {'frames':FRAMES,'buttons':MASK,'sample_every':{'type':'integer','minimum':1,'maximum':60},'timeout_ms':TIMEOUT}),
+      {'frames':FRAMES,'buttons':MASK,'sample_every':{'type':'integer','minimum':1,'maximum':60},'timeout_ms':TIMEOUT,'out':STR}),
+ tool('profile_realtime','Measure freely running update/draw rates against browser wall time, separate from VM FPS. Ends paused. Optional detailed CPU and inclusive/self function or section timings are enabled at load. Poll gaps are not precise frame-time measurements.',
+      {'seconds':{'type':'number','minimum':1,'maximum':30},'sample_ms':{'type':'integer','minimum':20,'maximum':1000},'buttons':MASK,'out':STR}),
  tool('logs','Read bounded browser logs and VM system messages; clear=true clears current logs/messages.',{'clear':BOOL},readonly=True),
  tool('session','Run an ordered batch of adapter tools and assertions in the same browser. Stops at first failure and saves JSON/PNG evidence. Steps use {tool,arguments}; assert steps use {assert:{name,equals}} or {assert:{pixel:[x,y],rgba:[r,g,b,a]}}.',
       {'steps':{'type':'array','items':{'type':'object'},'minItems':1,'maxItems':100},'failure_dir':STR},['steps']),
@@ -76,12 +87,13 @@ def validate(args,schema):
             if len(value)<spec.get('minItems',0) or len(value)>spec.get('maxItems',10000):raise AdapterError('INVALID_ARGUMENT',f'Invalid {name} length.')
 
 class Server:
-    def __init__(self,adapter):self.adapter=adapter
+    def __init__(self,adapter,tools=None,prefix='pico8_',name=NAME):
+        self.adapter=adapter;self.tools=tools or TOOLS;self.prefix=prefix;self.name=name;self.help_uri=prefix.rstrip("_")+"://help"
 
     def invoke(self,name,args):
-        entry=next((t for t in TOOLS if t['name']==name),None)
+        entry=next((t for t in self.tools if t['name']==name),None)
         if entry is None:raise AdapterError('UNKNOWN_TOOL','Unknown tool '+str(name))
-        validate(args,entry['inputSchema']);a=self.adapter;short=name.removeprefix('pico8_')
+        validate(args,entry['inputSchema']);a=self.adapter;short=name.removeprefix(self.prefix)
         if short=='get':return a.variable(**args)
         if short=='set':return a.variable(write=True,**args)
         if short=='logs':
@@ -136,10 +148,10 @@ class Server:
         if method=='initialize':
             supported=['2024-11-05','2025-03-26',PROTOCOL]
             result=dict(protocolVersion=params.get('protocolVersion') if params.get('protocolVersion') in supported else PROTOCOL,
-                        capabilities={'tools':{},'resources':{}},serverInfo={'name':NAME,'version':VERSION},
-                        instructions='Start one browser and reuse it. Load text carts with instrumentation for exact simulation stepping, scalar get/set and CPU telemetry. Setup caches the official runtime; no installation of Python or browser. Paths stay under --root. Close owned browser when finished. See pico8://help.')
+                        capabilities={'tools':{},'resources':{}},serverInfo={'name':self.name,'version':VERSION},
+                        instructions=('Use picotron_load, picotron_start and picotron_run for the native JS/WASM player. The Lua filesystem bridge supports exact callback stepping and scalar get/set; native audio continues independently. CPU uses 60-Hz units. See picotron://help.' if self.prefix=='picotron_' else 'Start one browser and reuse it. Load text carts with instrumentation for exact simulation stepping, scalar get/set and CPU telemetry. Setup caches the official runtime; no installation of Python or browser. Paths stay under --root. Close owned browser when finished. See pico8://help.'))
         elif method=='ping':result={}
-        elif method=='tools/list':result={'tools':TOOLS}
+        elif method=='tools/list':result={'tools':self.tools}
         elif method=='tools/call':
             try:
                 value=self.invoke(params.get('name'),params.get('arguments',{}))
@@ -151,11 +163,11 @@ class Server:
             except Exception as exc:
                 value={'ok':False,'error':error_info(exc)}
                 result={'content':[{'type':'text','text':json.dumps(value)}],'structuredContent':value,'isError':True}
-        elif method=='resources/list':result={'resources':[{'uri':'pico8://help','name':'Adapter workflow and limitations','mimeType':'text/markdown'}]}
+        elif method=='resources/list':result={'resources':[{'uri':self.help_uri,'name':'Adapter workflow and limitations','mimeType':'text/markdown'}]}
         elif method=='resources/read':
-            if params.get('uri')!='pico8://help':return rpc_error(ident,-32602,'Unknown resource')
+            if params.get('uri')!=self.help_uri:return rpc_error(ident,-32602,'Unknown resource')
             path=Path(__file__).with_name('readme.md')
-            result={'contents':[{'uri':'pico8://help','mimeType':'text/markdown','text':path.read_text(encoding='utf-8') if path.exists() else 'See tools/list.'}]}
+            result={'contents':[{'uri':self.help_uri,'mimeType':'text/markdown','text':path.read_text(encoding='utf-8') if path.exists() else 'See tools/list.'}]}
         elif isinstance(method,str) and method.startswith('notifications/'):return None
         else:return rpc_error(ident,-32601,'Method not found')
         if ident is None:return None
@@ -170,6 +182,7 @@ def main():
     if hasattr(sys.stdout,'reconfigure'):sys.stdout.reconfigure(encoding='utf-8',newline='\n')
     if hasattr(sys.stderr,'reconfigure'):sys.stderr.reconfigure(encoding='utf-8',errors='backslashreplace')
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--platform',choices=['pico8','picotron'],default='pico8',help='Select the browser VM backend.')
     parser.add_argument('--root',type=Path,default=Path.cwd(),help='Allowed cart/artifact root (default current directory).')
     parser.add_argument('--cache',type=Path,help='Runtime cache (default shared user-data runtime directory).')
     parser.add_argument('--profile',type=Path,help='Explicit browser profile override; default is the shared localhost profile.')
@@ -181,7 +194,13 @@ def main():
     args=parser.parse_args()
     if args.out and not args.build:parser.error('--out requires --build')
     if args.build and (args.setup or args.doctor):parser.error('--build cannot be combined with --setup or --doctor')
-    adapter=Adapter(args.root,args.cache,args.profile)
+    adapter_class=Adapter
+    native_tools=None
+    if args.platform=='picotron':
+        from picotron_adapter import PicotronAdapter
+        from picotron_mcp import TOOLS as native_tools
+        adapter_class=PicotronAdapter
+    adapter=adapter_class(args.root,args.cache,args.profile)
     if args.build:
         try:print(json.dumps(adapter.build(args.build,args.out),indent=2));return 0
         except Exception as exc:print(json.dumps({'ok':False,'error':error_info(exc)}));return 1
@@ -189,7 +208,7 @@ def main():
     if args.setup or args.doctor:
         try:print(json.dumps(adapter.setup(args.update) if args.setup else adapter.doctor(),indent=2));return 0
         except Exception as exc:print(json.dumps({'ok':False,'error':error_info(exc)}));return 1
-    server=Server(adapter)
+    server=Server(adapter,native_tools,'picotron_' if native_tools else 'pico8_','picotron-mcp' if native_tools else NAME)
     try:
         # MCP stdio is one JSON-RPC object per line, never HTTP Content-Length framing.
         for line in sys.stdin.buffer:

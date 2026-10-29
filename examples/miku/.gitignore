@@ -1,0 +1,8 @@
+*.p8
+*.p8.png
+*.zip
+build/
+debug/
+compact/
+__pycache__/
+*.pyc

@@ -5,3 +5,10 @@ debug/
 /examples/3dfloor/debug/
 __pycache__/
 *.pyc
+*.p8
+*.p8.png
+/examples/miku/build/
+
+*.p64.rom
+
+/examples/miku/build-picotron/

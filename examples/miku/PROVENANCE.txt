@@ -1,0 +1,53 @@
+MIKU DEMO / METHOD PROVENANCE
+
+ZX0 format and build-time compressor: Einar Saukas, BSD-3-Clause.
+https://github.com/einar-saukas/ZX0
+PICO-8 decoder: Nat Pryce, BSD-3-Clause; included unchanged from zx0.inc.p8.
+https://github.com/npryce/ZX0-Pico-8
+The decoder's complete notice is preserved in zx0.lua and LICENSES.txt.
+
+Original model 3 geometry: "Low poly Miku Hatsune" by emanueler, Sketchfab,
+published 20 August 2021. License listed there: CC Attribution-NonCommercial.
+https://sketchfab.com/3d-models/low-poly-miku-hatsune-b944f4d0561641f2954fcd4f9424e27f
+Adapted geometry, rig and weights: user's miku-skeletal-four-models Scratch
+project, model 3. Sly_i modified the original model for modesty and reduced
+its polygon count during the Scratch adaptation. PICO-8 packing/skinning
+are further modifications for this demo.
+Motion: UT AET Department @ LIM Lab / Ten / Nechronyx / Nabix.
+Miku Motion Actor: Diane Guo.
+Motion made for Mikufest at Komoricon: miku.fest40.
+Supplied VMD retarget/facials: Durles (skeletal motion used here).
+Rig loading, Euler interpolation, rigid/linear-blend skinning, face lighting,
+Verlet secondary motion and caching were implemented for this PICO-8 demo
+using those source data and Physics/Skinning tables.
+
+Triangle filling: standard incremental scanline implementation written for
+this demo; short-axis H/V traversal and thin-line approximations measured
+on this mesh. Community benchmark context, not a copied implementation:
+https://www.lexaloffle.com/bbs/index.php?tid=31478
+
+Sorting: standard linked depth buckets, implemented here. Insertion and
+Quicksort benchmark variants are also local implementations of standard
+algorithms; no external sorting implementation is bundled.
+
+Music: Miku, Anamanaguchi featuring Hatsune Miku. Instrumental arrangement
+source: creamil / Online Sequencer 2492007; note reduction, grid conversion
+and four-channel PICO-8 synthesis packing were implemented for this demo.
+https://onlinesequencer.net/2492007
+
+Lua source is assembled with #include expansion and no code minifier.
+
+Pure-Python ZX0 encoder/decoder: pico8mcp direct port of Einar Saukas'
+standard C v2.2 implementation. No zx0/dzx0 executables are used.
+
+Picotron port: the existing model, motion and four-voice tracker rows are
+format-converted without resampling. Bone, interpolation, skinning,
+rasterization and Verlet code is shared with the PICO-8 player.
+Native sound layout reference: pancelor's sfx/music data layout (CC BY 4.0),
+https://www.lexaloffle.com/bbs/?tid=143443
+and the official Picotron manual / PFX6416 working document. Current column
+strides and waveform descriptors were verified in the real 0.3.0d VM.
+Native P64/POD layout reference: shrinko8 (MIT),
+https://github.com/thisismypassport/shrinko8
+The SDK implements the standard container and LZ4 block format in Python;
+no shrinko8 code, vendor executable or runtime binary is bundled here.

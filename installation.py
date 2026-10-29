@@ -5,7 +5,7 @@ from pathlib import Path
 from pico8_paths import app_home
 
 FILES=('pico8_mcp.py','play.py','adapter.py','cdp.py','runtime.py','pico8_paths.py',
-       'installation.py','profiles.py','host.html','bridge.lua','readme.md','LICENSE')
+       'installation.py','profiles.py','bundles.py','source_build.py','zx0_codec.py','zx0_accel.py','artifacts.py','profiling.py','profiler.lua','host.html','bridge.lua','picotron_adapter.py','picotron_runtime.py','picotron_cart.py','picotron_mcp.py','picotron_bridge.lua','picotron.lua','picotron_audio.py','play_picotron.py','readme.md','LICENSE')
 
 def install_common(source=None):
     source=Path(source or __file__).resolve()

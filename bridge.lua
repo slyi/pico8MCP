@@ -1,8 +1,8 @@
--- PICO-8 MCP bridge v1. Appended only to the in-memory development cart.
+-- PICO-8 MCP bridge v2. Appended only to the in-memory development cart.
 -- Reserves GPIO 64..127; GPIO 0..63 remains available to the cartridge.
 -- The user callbacks and framebuffer are frozen while simulation is paused.
 local p8m={base=0x5fc0,paused=false,left=0,frame=0,seq=0,done=0,
- mask=0,previous=0,controlled=false,holds={},draw=false,cpu=0}
+ mask=0,previous=0,controlled=false,holds={},draw=false,cpu=0,draws=0}
 local p8m_init,p8m_draw,p8m_u60,p8m_u=_init,_draw,_update60,_update
 local p8m_btn,p8m_btnp=btn,btnp
 local p8m_rate=p8m_u60 and 60 or 30
@@ -19,6 +19,8 @@ end
 local function p8m_publish()
  poke(p8m.base+6,p8m.paused and 1 or 0)
  p8m_word(8,p8m.frame)
+ p8m_word(28,p8m.draws)
+ poke(p8m.base+30,p8m_rate)
  p8m_word(22,p8m.left)
  poke(p8m.base+12,stat(7))
  poke(p8m.base+24,p8m.done)
@@ -86,6 +88,13 @@ local function p8m_commands()
   end
   if cmd==5 then p8m_variable(false) end
   if cmd==6 then p8m_variable(true) end
+  if cmd==7 or cmd==8 or cmd==9 then
+   if __p8mcp_prof then
+    if cmd==7 then __p8mcp_prof.report(seq)
+    elseif cmd==8 then __p8mcp_prof.reset()
+    else __p8mcp_prof.cancel() end
+   else poke(p8m.base+15,4) end
+  end
   if cmd!=3 or p8m.left==0 then p8m.done=seq end
   poke(p8m.base+7,seq)
  end
@@ -114,7 +123,7 @@ end
 function _init()
  for i=0,63 do poke(p8m.base+i,0) end
  if p8m_init then p8m_init() end
- poke(p8m.base,80,56,65,49,1,1)
+ poke(p8m.base,80,56,65,49,2,1)
  p8m_publish()
 end
 
@@ -127,8 +136,10 @@ local function p8m_update()
    else p8m.holds[i]=0 end
   end
   local before=stat(1)
+  if __p8mcp_prof then __p8mcp_prof.begin_phase(1) end
   if p8m_u60 then p8m_u60()
   elseif p8m_u then p8m_u() end
+  if __p8mcp_prof then __p8mcp_prof.end_phase() end
   p8m.cpu+=stat(1)-before
   p8m.previous=p8m.mask
   p8m.frame=(p8m.frame+1)&0x7fff
@@ -143,13 +154,17 @@ if p8m_u60 then _update60=p8m_update else _update=p8m_update end
 function _draw()
  if p8m.draw then
   local before=stat(1)
+  if __p8mcp_prof then __p8mcp_prof.begin_phase(2) end
   if p8m_draw then p8m_draw() end
+  if __p8mcp_prof then __p8mcp_prof.end_phase() end
+  p8m.draws=(p8m.draws+1)&0x7fff
   p8m.cpu+=stat(1)-before
   p8m_percent(10,stat(1))
   p8m_percent(13,p8m.cpu)
   p8m_word(26,min(__p8mcp_draws,32767))
   if p8m.paused and p8m.left==0 then p8m.done=p8m.seq end
   p8m.draw=false
+  if __p8mcp_prof then __p8mcp_prof.frame() end
  end
  p8m_publish()
 end

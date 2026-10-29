@@ -1,4 +1,4 @@
-name: Test PICO-8 MCP
+name: Test PICO-8 and Picotron MCP
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
   test:
     name: ${{ matrix.name }} / Python 3.12
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -67,5 +67,32 @@ jobs:
         with:
           name: results-${{ matrix.runner }}-${{ matrix.architecture }}
           path: debug/ci/
+          if-no-files-found: warn
+          retention-days: 7
+
+  picotron:
+    name: Picotron JS/WASM / Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Native Picotron MCP, shared floor and complete Miku clip
+        run: |
+          export PICO8_BROWSER="$(command -v google-chrome)"
+          python -B tests/picotron_ci.py
+      - name: Upload Picotron screenshots and playback evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: picotron-linux-x64
+          path: debug/ci-picotron/
           if-no-files-found: warn
           retention-days: 7

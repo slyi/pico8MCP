@@ -68,9 +68,9 @@ try {
         -WorkingDirectory $source -RedirectStandardOutput $log `
         -RedirectStandardError $errors -PassThru
     $handle = $process.Handle
-    if (-not $process.WaitForExit(600000)) {
+    if (-not $process.WaitForExit(2400000)) {
         Stop-Process -Id $process.Id -Force
-        throw 'Standard-account CI exceeded ten minutes.'
+        throw 'Standard-account CI exceeded forty minutes.'
     }
     $exitCode = $process.ExitCode
     if ($null -eq $exitCode) { throw 'Could not read the standard-account process exit code.' }

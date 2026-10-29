@@ -20,6 +20,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from cdp import CDPError, connect, list_targets
 import runtime
+import profiling
+from bundles import bundle_specs
 from pico8_paths import app_home,browser_profile
 from installation import install_common
 from profiles import ProfileLease,ProfileBusy
@@ -59,10 +61,14 @@ def browser_path(preference='auto'):
             if preference in ('auto','chromium'):candidates.append(base/'Chromium.app/Contents/MacOS/Chromium')
     return next((str(p) for p in candidates if p.is_file()),None)
 
-def prepare_cart(data: bytes, filename: str, instrument=True, count_draws=False):
+def prepare_cart(data: bytes, filename: str, instrument=True, count_draws=False,
+                 profiling_enabled=False, profile_functions=None, profile_sections=False):
+    detailed=bool(profiling_enabled or profile_functions or profile_sections)
+    if detailed and not instrument:
+        raise AdapterError('INVALID_ARGUMENT','Profiling requires instrument=true.')
     if filename.lower().endswith('.png'):
         if instrument:raise AdapterError('UNSUPPORTED_CART','Use a text .p8/.lua cart for bridge injection, or instrument=false for PNG carts.')
-        return data,dict(instrumented=False,countDraws=False)
+        return data,dict(instrumented=False,countDraws=False,profiling=False,profileScopes=[])
     try:text=data.decode('utf-8-sig').replace('\r\n','\n')
     except UnicodeDecodeError as exc:raise AdapterError('INVALID_CART','Text carts must be UTF-8.') from exc
     if filename.lower().endswith('.lua'):
@@ -72,23 +78,28 @@ def prepare_cart(data: bytes, filename: str, instrument=True, count_draws=False)
     end=re.search(r'(?m)^__[a-z0-9_]+__\s*$',text[match.end():])
     body_end=match.end()+end.start() if end else len(text)
     lua=text[match.end():body_end].rstrip()
+    profile_meta=dict(profiling=False,profileScopes=[])
     if instrument:
-        if '-- PICO-8 MCP bridge v1.' in lua:raise AdapterError('ALREADY_INSTRUMENTED','Source already contains this bridge; load with instrument=false.')
-        prefix='local __p8mcp_draws=0\n'
+        if '-- PICO-8 MCP bridge v' in lua:raise AdapterError('ALREADY_INSTRUMENTED','Source already contains this bridge; load with instrument=false.')
+        try:
+            prefix,lua,suffix,profile_meta=profiling.instrument(lua,profiling_enabled,profile_functions,profile_sections)
+        except ValueError as exc:
+            raise AdapterError('INVALID_ARGUMENT',str(exc)) from exc
+        prefix+='local __p8mcp_draws=0\n'
         if count_draws:
             for name in DRAW_APIS:
                 prefix+=f'local __p8mcp_native_{name}={name}\nlocal function {name}(...) __p8mcp_draws+=1 return __p8mcp_native_{name}(...) end\n'
-        lua=prefix+lua+'\n'+(HERE/'bridge.lua').read_text()
+        lua=prefix+lua+'\n'+suffix+'\n'+(HERE/'bridge.lua').read_text()
     tail=text[body_end:] if end else '__gfx__\n'+'0'*128+'\n'
     text=text[:match.end()]+lua+'\n'+tail.rstrip()+'\n'
-    return text.encode('utf-8'),dict(instrumented=instrument,countDraws=instrument and count_draws)
+    return text.encode('utf-8'),dict(instrumented=instrument,countDraws=instrument and count_draws,**profile_meta)
 
 class Adapter:
     def __init__(self,root,cache=None,profile=None):
         self.root=Path(root).resolve();self.root.mkdir(parents=True,exist_ok=True)
         self.cache=Path(cache).resolve() if cache else app_home()/'runtime'
         self.profile_path=Path(profile).resolve() if profile else browser_profile()
-        self.client=None;self.process=None;self.http=None;self.port=None;self.loaded=None
+        self.client=None;self.process=None;self.http=None;self.port=None;self.loaded=None;self.bundle=None
         self.sequence=0;self.profile_dir=None;self.headless=None;self.profile_lease=None
         self.browser_logs=deque(maxlen=40)
 
@@ -230,9 +241,12 @@ class Adapter:
             data['bridge'].update(paused=g[70]==1,accepted=g[71],completed=g[88],
                                   updates=word(8),stepsRemaining=word(22),cpu=word(10)/10000,
                                   cpuUser=word(13)/10000,fps=g[76],
+                                  draws=word(28) if g[68]>=2 else None,
+                                  updateHz=g[94] if g[68]>=2 else None,
                                   drawCalls=word(26) if self.loaded and self.loaded['metadata']['countDraws'] else None,
                                   cpuSaturated=word(10)>=30000,errorCode=g[79])
         data['cart']=self.loaded['metadata'] if self.loaded else None
+        data['bundle']=self.bundle
         data['errors']=[m for m in data['vm'].get('system_messages',[]) if ERROR_RE.search(str(m))]
         data['profile']=str(self.profile_path)
         return data
@@ -246,21 +260,128 @@ class Adapter:
           window.__p8agent.expectedGeneration=generation+1;
           p8_drop_file({dataTransfer:{files:[file]},preventDefault(){},stopPropagation(){}});
           return true;})()'''.replace('DATA',json.dumps(encoded)).replace('NAME',json.dumps(name)))
-        self._wait_js('__p8agent.loadGeneration>=__p8agent.expectedGeneration && codo_command===0',timeout_ms,settle_frames=2)
+        self._wait_js('''__p8agent.loadGeneration>=__p8agent.expectedGeneration && codo_command===0 &&
+          (pico8_state.system_messages||[]).some(x=>String(x).toLowerCase().startsWith("loaded "))''',timeout_ms,settle_frames=2)
 
-    def load(self,cart=None,lua=None,instrument=True,count_draws=False,timeout_ms=15000):
+    def load(self,cart=None,lua=None,instrument=True,count_draws=False,timeout_ms=15000,
+             profiling=False,profile_functions=None,profile_sections=False):
         if (cart is None)==(lua is None):raise AdapterError('INVALID_ARGUMENT','Provide exactly one of cart or lua.')
         if cart:
             path=self.path(cart);data=path.read_bytes();name=path.name;origin=str(path)
             if not name.lower().endswith(('.p8','.lua','.p8.png')):raise AdapterError('INVALID_CART','Expected .p8, .lua or .p8.png.')
         else:data=lua.encode('utf-8');name='agent.lua';origin='inline Lua'
         if len(data)>1024*1024:raise AdapterError('CART_TOO_LARGE','Maximum cartridge input is 1 MiB.')
-        payload,metadata=prepare_cart(data,name,instrument,count_draws)
+        payload,metadata=prepare_cart(data,name,instrument,count_draws,profiling,profile_functions,profile_sections)
         if name.endswith('.lua'):name=name[:-4]+'.p8'
         self._load_bytes(payload,name,timeout_ms)
         metadata.update(source=origin,name=name,sha256=hashlib.sha256(data).hexdigest(),loadedBytes=len(payload))
         self.loaded=dict(payload=payload,name=name,metadata=metadata)
+        self.bundle=None
         return dict(loaded=True,**metadata)
+
+    def _plan_bundle(self,entry,carts=None,entry_name=None,instrument=False,count_draws=False,
+                     profiling=False,profile_functions=None,profile_sections=False):
+        try:specs=bundle_specs(entry,carts,entry_name)
+        except ValueError as exc:raise AdapterError('INVALID_ARGUMENT',str(exc)) from exc
+        plan=[]
+        for spec in specs:
+            path=self.path(spec['cart']);data=path.read_bytes()
+            if len(data)>1024*1024:raise AdapterError('CART_TOO_LARGE','Maximum cartridge input is 1 MiB.',{'source':str(path)})
+            main=spec['entry']
+            payload,meta=prepare_cart(data,path.name,instrument if main else False,
+                 count_draws if main else False,profiling if main else False,
+                 profile_functions if main else None,profile_sections if main else False)
+            meta.update(source=str(path),name=spec['name'],sha256=hashlib.sha256(data).hexdigest(),loadedBytes=len(payload))
+            drop_name=spec['name']+'.png' if path.name.lower().endswith('.p8.png') else spec['name']
+            meta['inputName']=drop_name
+            plan.append(dict(payload=payload,name=spec['name'],dropName=drop_name,metadata=meta,entry=main))
+        return plan
+
+    def _save_staged_cart(self,name,timeout_ms):
+        # A native SAVE both writes the VM filesystem and emits a download.
+        # The exact-name download acknowledges completion; no fixed sleep.
+        start=self._eval('__p8agent.downloads.length')
+        command=[ord(c) for c in 'save '+name]+[13]
+        self._eval('__p8agent.stageSave={confirmed:false};codo_key_buffer.push(...'+json.dumps(command)+');true')
+        # Replacing an existing name in this owned VM is part of staging.
+        # Confirm only the native SAVE overwrite prompt for this request.
+        predicate='''(()=>{
+          if(!__p8agent.stageSave.confirmed && (pico8_state.system_messages||[]).some(x=>String(x).toLowerCase().includes("overwrite?"))){
+            __p8agent.stageSave.confirmed=true;codo_key_buffer.push(121,13);
+          }
+          return codo_key_buffer.length===0 && __p8agent.downloads.slice(START).some(d=>d.name.toLowerCase()===NAME);
+        })()'''
+        self._wait_js(predicate.replace('START',str(start)).replace('NAME',json.dumps(name)),timeout_ms)
+        return self._eval('''(()=>{const i=__p8agent.downloads.findIndex((d,i)=>i>=START&&d.name.toLowerCase()===NAME);
+          return i>=0?__p8agent.downloads.splice(i,1)[0].contents:null;})()'''.replace('START',str(start)).replace('NAME',json.dumps(name)))
+
+    def _stop_for_staging(self,timeout_ms):
+        # Native frame_number advances during a game, including a paused Lua
+        # bridge, but stops in the console/editor. Escape must not be sent
+        # blindly: in an idle console it switches to the code editor.
+        running=self._eval('''new Promise(resolve=>{
+          const first=pico8_state.frame_number||0,start=performance.now();
+          function tick(){
+            if((pico8_state.frame_number||0)!==first){resolve(true);return;}
+            if(performance.now()-start>=180){resolve(false);return;}
+            requestAnimationFrame(tick);
+          }requestAnimationFrame(tick);
+        })''',min(timeout_ms/1000+1,5))
+        self._eval('codo_key_buffer.length=0;true')
+        if running:
+            self.client.call('Input.dispatchKeyEvent',dict(type='keyDown',key='Escape',code='Escape',windowsVirtualKeyCode=27))
+            try:self._wait_js('true',timeout_ms,settle_frames=6)
+            finally:self.client.call('Input.dispatchKeyEvent',dict(type='keyUp',key='Escape',code='Escape',windowsVirtualKeyCode=27))
+
+    def load_bundle(self,entry,carts=None,entry_name=None,instrument=False,count_draws=False,
+                    profiling=False,profile_functions=None,profile_sections=False,timeout_ms=60000):
+        if type(timeout_ms) is not int or not 100<=timeout_ms<=60000:
+            raise AdapterError('INVALID_ARGUMENT','timeout_ms must be 100..60000 for bundle staging.')
+        # Validate every path, alias and source before replacing any VM cart.
+        plan=self._plan_bundle(entry,carts,entry_name,instrument,count_draws,profiling,profile_functions,profile_sections)
+        if not self.client:raise AdapterError('NOT_STARTED','Call pico8_start before loading a bundle.')
+        deadline=time.monotonic()+timeout_ms/1000;staged=[];current=None
+        self.bundle=None;self.loaded=None
+        def remaining():
+            value=int((deadline-time.monotonic())*1000)
+            if value<=0:raise AdapterError('BUNDLE_TIMEOUT','Bundle staging exceeded timeout_ms.')
+            return value
+        try:
+            self._stop_for_staging(remaining())
+            for current in plan:
+                self._load_bytes(current['payload'],current['dropName'],remaining())
+                saved=self._save_staged_cart(current['name'],remaining())
+                if current['dropName'].lower().endswith('.png'):
+                    # Re-drop the VM's own text serialization under the .p8
+                    # alias, registering PNG dependencies consistently with
+                    # text carts for native LOAD and the cache bootstrap.
+                    if not isinstance(saved,str):raise AdapterError('BUNDLE_FORMAT_ERROR','Native SAVE did not return text-cart data.')
+                    if saved.startswith('pico-8 cartridge'):canonical=saved.encode('utf-8')
+                    else:
+                        try:canonical=base64.b64decode(saved.split(',',1)[1] if saved.startswith('data:') else saved,validate=True)
+                        except ValueError as exc:raise AdapterError('BUNDLE_FORMAT_ERROR','Native text-cart serialization was not valid base64.') from exc
+                    canonical=canonical.removeprefix(b'\xef\xbb\xbf')
+                    if len(canonical)>1024*1024 or not canonical.startswith(b'pico-8 cartridge'):
+                        raise AdapterError('BUNDLE_FORMAT_ERROR','Native SAVE did not produce a supported .p8 text cart.')
+                    # SAVE omits empty asset sections. The Education file-drop
+                    # parser still needs a footer or it clips the final token.
+                    canonical,_=prepare_cart(canonical,current['name'],False)
+                    current['payload']=canonical;current['dropName']=current['name']
+                    current['metadata']['loadedBytes']=len(canonical)
+                    self._load_bytes(canonical,current['name'],remaining())
+                    self._save_staged_cart(current['name'],remaining())
+                staged.append(dict(**current['metadata'],entry=current['entry']))
+        except Exception as exc:
+            self.loaded=None;self.bundle=None
+            details=dict(failedCart=current['name'] if current else None,staged=staged,
+                         cause=getattr(exc,'code',type(exc).__name__),message=str(exc))
+            raise AdapterError('BUNDLE_STAGE_FAILED','Could not stage the complete bundle; partial native saves remain in this owned VM.',details) from exc
+        main=plan[-1]
+        self.loaded=dict(payload=main['payload'],name=main['dropName'],metadata=main['metadata'])
+        self.bundle=dict(entry=main['name'],carts=staged,stagedCount=len(staged),
+                         method='native file drop and SAVE',
+                         note='Entry selected, not run. Files are in this profile\'s native VM filesystem. Call run next; subsequent LOAD/RELOAD remain native.')
+        return dict(loaded=True,**self.bundle)
 
     def run(self,paused=False,timeout_ms=15000):
         if not self.loaded:raise AdapterError('NO_CART','Load a cart before running.')
@@ -273,6 +394,22 @@ class Adapter:
         else:
             self._wait_js('codo_key_buffer.length===0 && (pico8_state.frame_number||0)>0',timeout_ms,settle_frames=6)
         return self.state()
+
+    def pack_source(self,cart,out=None):
+        from source_build import build_cart
+        source=self.path(cart)
+        if source.suffix.lower()!='.lua':raise AdapterError('INVALID_ARGUMENT','Source must be a .lua file.')
+        if source.stat().st_size>1024*1024:raise AdapterError('CART_TOO_LARGE','Maximum Lua source input is 1 MiB.')
+        target=self.path(out or str(source.relative_to(self.root).parent/'build'/(source.stem+'.p8')),output=True)
+        if target.suffix.lower()!='.p8':raise AdapterError('INVALID_ARGUMENT','Source output must end with .p8.')
+        try:return dict(built=True,**build_cart(source,target,self.root))
+        except (ValueError,IndexError,KeyError,TypeError) as exc:raise AdapterError('INVALID_SOURCE',str(exc)) from exc
+
+    def cart_size(self,cart):
+        from artifacts import cart_sizes
+        path=self.path(cart)
+        try:return dict(path=str(path),**cart_sizes(path))
+        except (ValueError,IndexError,KeyError) as exc:raise AdapterError('INVALID_CART',str(exc)) from exc
 
     def build(self,cart,out=None,label_frames=10,timeout_ms=30000):
         """Build an uninstrumented PNG cartridge with a native captured label."""
@@ -309,12 +446,8 @@ class Adapter:
         key('keyUp','Escape','Escape',27)
         # Native frame_number stops in the console; use browser render ticks.
         self._wait_js('true',timeout_ms,settle_frames=4)
-        command=[ord(c) for c in 'save pico8mcp-build.p8.png']+[13]
-        self._eval('codo_key_buffer.push(...'+json.dumps(command)+');true')
-        try:self._wait_js('__p8agent.downloads.some(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")',timeout_ms)
+        try:encoded=self._save_staged_cart('pico8mcp-build.p8.png',timeout_ms)
         except AdapterError as exc:raise AdapterError('BUILD_FAILED','Native console did not export the PNG.',{'cause':str(exc),'messages':self.state().get('vm',{}).get('system_messages',[])}) from exc
-        download=self._eval('__p8agent.downloads.find(d=>d.name.toLowerCase()==="pico8mcp-build.p8.png")')
-        encoded=download['contents']
         if not isinstance(encoded,str):
             raise AdapterError('BUILD_FAILED','Native PNG download has an unsupported encoding.')
         if encoded.startswith('data:'):encoded=encoded.split(',',1)[1]
@@ -412,20 +545,110 @@ class Adapter:
         path=self.path(name,output=True);path.write_bytes(data)
         return dict(path=str(path),width=width,height=height,mimeType='image/png',data=base64.b64encode(data).decode())
 
-    def profile(self,frames=60,buttons=0,sample_every=1,timeout_ms=45000):
-        if not 1<=frames<=600 or not 1<=sample_every<=60:raise AdapterError('INVALID_ARGUMENT','frames must be 1..600 and sample_every 1..60.')
+    def _profile_reset(self):
+        if self.loaded and self.loaded['metadata'].get('profiling'):
+            self._command(8)
+
+    def _profile_report(self):
+        if not self.loaded or not self.loaded['metadata'].get('profiling'):return None
+        self._eval('__p8agent.logs=__p8agent.logs.filter(x=>!x.text.includes("@@p8mcp_prof:"));true')
+        self._command(7)
+        logs=self._eval('__p8agent.logs')
+        try:return profiling.decode_report(logs,self.sequence,self.loaded['metadata']['profileScopes'])
+        except (ValueError,KeyError,TypeError) as exc:
+            raise AdapterError('PROFILE_REPORT_ERROR',str(exc),{'logs':logs[-25:]}) from exc
+
+    def _profile_abort(self):
+        try:self.pause()
+        except AdapterError:pass
+        if self.loaded and self.loaded['metadata'].get('profiling'):
+            try:self._command(9)
+            except AdapterError:pass
+
+    def _profile_save(self,report,target):
+        if target:
+            report['path']=str(target)
+            target.write_text(json.dumps(report,indent=2,allow_nan=False),encoding='utf-8')
+        return report
+
+    def profile(self,frames=60,buttons=0,sample_every=1,timeout_ms=45000,out=None):
+        if type(frames) is not int or type(sample_every) is not int or not 1<=frames<=600 or not 1<=sample_every<=60:
+            raise AdapterError('INVALID_ARGUMENT','frames must be 1..600 and sample_every 1..60.')
+        target=self.path(out,output=True) if out else None
         start=time.monotonic();self.pause();rows=[];left=frames
-        while left:
-            n=min(left,sample_every)
-            state=self.step(n,buttons,min(20000,timeout_ms))['state'];b=state['bridge']
-            rows.append({k:b[k] for k in ['updates','cpu','cpuUser','fps','drawCalls']});left-=n
-            if time.monotonic()-start>timeout_ms/1000:raise AdapterError('PROFILE_TIMEOUT','Profile exceeded its bounded timeout.',{'samples':rows})
+        self._profile_reset()
+        try:
+            while left:
+                n=min(left,sample_every)
+                state=self.step(n,buttons,min(20000,timeout_ms))['state'];b=state['bridge']
+                rows.append({k:b[k] for k in ['updates','cpu','cpuUser','fps','drawCalls']});left-=n
+                if time.monotonic()-start>timeout_ms/1000:raise AdapterError('PROFILE_TIMEOUT','Profile exceeded its bounded timeout.',{'samples':rows})
+        except Exception:
+            self._profile_abort()
+            raise
         import statistics
         summary={k:dict(mean=statistics.mean(r[k] for r in rows),min=min(r[k] for r in rows),max=max(r[k] for r in rows)) for k in ['cpu','cpuUser']}
         summary['drawCalls']=(dict(mean=statistics.mean(r['drawCalls'] for r in rows),min=min(r['drawCalls'] for r in rows),max=max(r['drawCalls'] for r in rows)) if self.loaded['metadata']['countDraws'] else None)
-        return dict(frames=frames,sampleEvery=sample_every,samples=rows,summary=summary,
+        return self._profile_save(dict(mode='stepped',frames=frames,sampleEvery=sample_every,samples=rows,summary=summary,
+                    detail=self._profile_report(),
                     drawCounting=self.loaded['metadata']['countDraws'],
-                    note='CPU fractions include development instrumentation; cpuUser brackets user update/draw callbacks. Draw counts are API calls, not GPU submissions. Simulation is paused after capture.')
+                    note='CPU fractions include development instrumentation; 1.0 means one frame budget, not 100% of a normalized breakdown. '
+                         'cpuUser brackets user update/draw callbacks. Draw counts are API calls. '
+                         'Stepping changes update/draw scheduling; use profile_realtime to measure playback rates. '
+                         'Simulation is paused after capture.'),target)
+
+    def profile_realtime(self,seconds=5,sample_ms=100,buttons=0,out=None):
+        if type(seconds) not in (int,float) or not math.isfinite(seconds) or not 1<=seconds<=30:
+            raise AdapterError('INVALID_ARGUMENT','seconds must be 1..30.')
+        if type(sample_ms) is not int or not 20<=sample_ms<=1000:
+            raise AdapterError('INVALID_ARGUMENT','sample_ms must be 20..1000.')
+        if type(buttons) is not int or not 0<=buttons<=63:
+            raise AdapterError('INVALID_ARGUMENT','buttons must be 0..63.')
+        target=self.path(out,output=True) if out else None
+        state=self.pause()
+        if state['bridge'].get('version',0)<2:
+            raise AdapterError('BRIDGE_REQUIRED','Reload the cart with the current bridge for real-time profiling.')
+        self.buttons(buttons);self._profile_reset()
+        # The sampler is passive: it never requests simulation steps. It starts
+        # immediately before resume, including the initial scheduling delay.
+        self._eval('''(()=>{
+          const start=performance.now(),samples=[],capture={stop:false};
+          const word=o=>(pico8_gpio[64+o]||0)+256*(pico8_gpio[65+o]||0);
+          function sample(){return {ms:performance.now()-start,updates:word(8),draws:word(28),
+            cpu:word(10)/10000,cpuUser:word(13)/10000,vmFps:pico8_gpio[76]};}
+          samples.push(sample());
+          capture.promise=new Promise(resolve=>{
+            function tick(){
+              samples.push(sample());
+              const errors=(pico8_state.system_messages||[]).filter(x=>/syntax error|runtime error|assertion failed|out of memory|attempt to /i.test(String(x))).map(String);
+              if(capture.stop||errors.length||performance.now()-start>=DURATION){resolve({samples,errors});return;}
+              setTimeout(tick,INTERVAL);
+            }
+            setTimeout(tick,INTERVAL);
+          });
+          __p8agent.profileCapture=capture;return true;
+        })()'''.replace('DURATION',str(seconds*1000)).replace('INTERVAL',str(sample_ms)))
+        try:
+            self.resume()
+            capture=self._eval('__p8agent.profileCapture.promise',seconds+10)
+            if capture['errors']:
+                raise AdapterError('PROFILE_CART_ERROR','Cart failed during capture.',{'errors':capture['errors']})
+            self.pause()
+        except Exception:
+            try:
+                self._eval('__p8agent.profileCapture.stop=true;true')
+                self.pause()
+            except Exception:pass
+            self._profile_abort()
+            raise
+        samples=capture['samples']
+        result=dict(mode='realtime',requestedSeconds=seconds,sampleMs=sample_ms,
+                    rates=profiling.rates(samples),samples=samples,detail=self._profile_report(),
+                    note='Simulation runs freely during capture and is paused afterward. '
+                         'Scope timings require profiling=true, profile_functions or profile_sections at load. '
+                         'Instrumentation adds CPU cost. CPU detail includes resume/pause command latency; '
+                         'wall-rate samples cover the requested browser-time window.')
+        return self._profile_save(result,target)
 
     def close(self):
         cleanup=None
@@ -453,4 +676,5 @@ class Adapter:
             cleanup='preserved'
         self.profile_dir=None
         self.loaded=None
+        self.bundle=None
         return dict(closed=True,profileCleanup=cleanup,profile=str(self.profile_path))

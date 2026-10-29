@@ -7,6 +7,16 @@
         "--root",
         "/absolute/path/to/cart-project"
       ]
+    },
+    "picotron": {
+      "command": "python3",
+      "args": [
+        "/absolute/path/to/pico8-mcp/pico8_mcp.py",
+        "--platform",
+        "picotron",
+        "--root",
+        "/absolute/path/to/cart-project"
+      ]
     }
   }
 }

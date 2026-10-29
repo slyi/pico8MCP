@@ -16,6 +16,8 @@ import threading
 import time
 import zlib
 from pathlib import Path
+from profiling_checks import run_profiler_checks
+from multicart_checks import run_multicart_checks
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -39,18 +41,22 @@ def temporary_installation():
                 time.sleep(0.25)
 
 
-def run(command, **kwargs):
+def run(command, timeout=180, **kwargs):
     result = subprocess.run(command, capture_output=True, text=True,
-                            encoding='utf-8', timeout=180, **kwargs)
+                            encoding='utf-8', timeout=timeout, **kwargs)
     if result.returncode:
         raise RuntimeError(f'{command[0]} exited {result.returncode}:\n{result.stdout}\n{result.stderr}')
     return result.stdout
 
 
 class Client:
-    def __init__(self, entrypoint, root, env):
+    def __init__(self, entrypoint, root, env, cache=None, platform="pico8"):
+        self.platform=platform
+        command=[sys.executable, '-B', str(entrypoint), '--root', str(root)]
+        if platform!='pico8':command+=['--platform',platform]
+        if cache:command+=['--cache',str(cache)]
         self.process = subprocess.Popen(
-            [sys.executable, '-B', str(entrypoint), '--root', str(root)],
+            command,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding='utf-8', env=env)
         self.responses = queue.Queue()
@@ -76,7 +82,7 @@ class Client:
         return reply['result']
 
     def tool(self, tool_name, **arguments):
-        result = self.request('tools/call', dict(name='pico8_'+tool_name, arguments=arguments))
+        result = self.request('tools/call', dict(name=self.platform+'_'+tool_name, arguments=arguments))
         assert not result.get('isError'), result
         value = result['structuredContent']
         if tool_name == 'screenshot':
@@ -155,6 +161,7 @@ def main():
             env['PICO8_MCP_HOME'] = str(Path(folder)/'common')
             env.pop('PICO8_MCP_PROFILE_DIR', None)
             run([sys.executable, '-B', str(REPO/'tests/test_adapter.py')], env=env, cwd=REPO)
+            run([sys.executable, '-B', str(REPO/'tests/test_zx0_accel.py')], env=env, cwd=REPO)
             print('Offline regression suite passed.', flush=True)
             example = REPO/'examples/3dfloor'
             setup_command = [sys.executable, '-B', str(REPO/'pico8_mcp.py'),
@@ -201,9 +208,15 @@ def main():
                 client.tool('step', frames=12, buttons=18)
                 after = client.tool('get', name='cam_u')['value']
                 assert before != after, 'Controller strafe did not update the camera'
+                profiling=run_profiler_checks(client)
+                report['profiling']={name:value['mode'] for name,value in profiling.items()}
+                report['multicart']=run_multicart_checks(client,example)
                 built = client.tool('build', cart='floor.lua', out='debug/ci/floor.p8.png', label_frames=6)
                 assert built['verified'] and built['labelCaptured'] and not built['instrumented'], built
                 cartridge = Path(built['path']).read_bytes()
+                size=client.tool('cart_size',cart='debug/ci/floor.p8.png')
+                assert size['romPayloadBytes']==32768 and size['compressedLuaBytes']>0,size
+                report['cartSizeInspector']=True
                 (out/'floor.p8.png').write_bytes(cartridge)
                 label = png_pixels(cartridge, expected_size=(160, 205))
                 label_ground = [p for row in label[100:148] for p in row[20:140]]
@@ -221,6 +234,20 @@ def main():
             assert '30 FPS' in output, output
             report.update(launcher=True, nativeFps=30)
             print('3dfloor run, yaw screenshots, movement and native launcher passed.', flush=True)
+            multicart = REPO/'examples/miku'
+            launcher = (['cmd.exe', '/d', '/c', str(multicart/'play.cmd')] if os.name == 'nt'
+                        else ['sh', str(multicart/'play.sh')])
+            print('Building/running Miku; cold Python compression can take several minutes.', flush=True)
+            output = run([*launcher, '--headless', '--duration', '8'], env=env, cwd=multicart, timeout=1800)
+            assert 'Staged 4 carts with pico8mcp load_bundle.' in output, output
+            assert 'All 15 motion checksums match the Lua build.' in output, output
+            assert 'Headless playback verified; zero motion underflows.' in output, output
+            preview=multicart/'build/carts/preview.png'
+            assert preview.is_file(), 'Missing Miku playback screenshot'
+            (out/'miku.png').write_bytes(preview.read_bytes())
+            report['multicartLauncher'] = True
+            report['miku'] = dict(carts=4,allMotionChecksums=True,underflows=0)
+            print('Miku multicart launcher and motion checksums passed.', flush=True)
         report['ok'] = True
     finally:
         (out/'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
